@@ -1,0 +1,100 @@
+#!/bin/sh
+
+. $HOME/.comdirect
+
+if ! command -v curl >/dev/null 2>&1 ; then
+    echo >&2 "missing curl."
+    exit 1    
+fi
+
+if ! command -v jq >/dev/null 2>&1 ; then
+    echo >&1 "missing jq."
+    exit 1
+fi
+
+CLIENT_REQUEST_ID='{"clientRequestId":{"sessionId":"icanhascheezburger","requestId":0}}'
+
+# 2.1 OAuth2 Resource Owner Password Credentials Flow
+
+RESPONSE=$(curl -sS                  \
+     -d client_id=$CLIENT_ID         \
+     -d client_secret=$CLIENT_SECRET \
+     -d username=$USERNAME           \
+     -d password=$PASSWORD           \
+     -d grant_type=password          \
+     -H 'Accept: application/json'   \
+     https://api.comdirect.de/oauth/token)
+
+ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
+
+# 2.2 Abruf Session-Status
+
+RESPONSE=$(curl -sS \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H 'Accept: application/json' \
+    -H 'Content-Type: application/json' \
+    -H "x-http-request-info: $CLIENT_REQUEST_ID" \
+    https://api.comdirect.de/api/session/clients/user/v1/sessions)
+
+IDENTIFIER=$(echo "$RESPONSE" | jq -r ".[].identifier")
+
+# 2.3 Anlage Validierung einer Session-Tan
+
+CLIENT_REQUEST_BODY=$(jq -ncj \
+    --arg identifier $IDENTIFIER \
+    '{"identifier":$identifier,"sessionTanActive":true,"activated2FA":true}')
+
+TAN_CHALLENGE_ID=$(curl -sS \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H 'Accept: application/json' \
+    -H 'Content-Type: application/json' \
+    -H "x-http-request-info: $CLIENT_REQUEST_ID" \
+    -d "$CLIENT_REQUEST_BODY" \
+    -D - \
+    https://api.comdirect.de/api/session/clients/user/v1/sessions/$IDENTIFIER/validate \
+    -o /dev/null | grep "x-once-authentication-info" | cut -c29- | jq -r ".id")
+
+read -p "Accept push TAN and press enter to continue"
+
+# 2.4 Aktivierung einer Session-TAN
+
+ID_OBJ=$(jq -ncj \
+    --arg id $TAN_CHALLENGE_ID \
+    '{"id":$id}')
+
+curl -X PATCH -sS \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H 'Accept: application/json' \
+    -H "x-http-request-info: $CLIENT_REQUEST_ID" \
+    -H 'Content-Type: application/json' \
+    -H "x-once-authentication-info: $ID_OBJ" \
+    -d "$CLIENT_REQUEST_BODY" \
+    https://api.comdirect.de/api/session/clients/user/v1/sessions/$IDENTIFIER > /dev/null
+
+# 2.5 CD Secondary Flow
+
+RESPONSE=$(curl -sS \
+    -d client_id=$CLIENT_ID \
+    -d client_secret=$CLIENT_SECRET \
+    -d grant_type=cd_secondary \
+    -d token=$ACCESS_TOKEN \
+    -H 'Accept:application/json' \
+    https://api.comdirect.de/oauth/token)
+
+ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
+
+# 4.1.1 Abruf AccountBalances alle Konten
+curl -sS  \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H 'Accept: application/json' \
+    -H 'Content-Type: application/json' \
+    -H "x-http-request-info: $CLIENT_REQUEST_ID" \
+    https://api.comdirect.de/api/banking/clients/user/v2/accounts/balances | jq -r '.values[] | [ .account.accountType.text, .balanceEUR.value] | @tsv'
+
+# Revoke token
+
+curl -X DELETE -sS \
+    -H 'Accept: application/json' \
+    -H 'Content-Type:application/x-www-form-urlencoded' \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    https://api.comdirect.de/oauth/revoke
