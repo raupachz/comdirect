@@ -1,29 +1,59 @@
 #!/bin/sh
 
-. $HOME/.comdirect
+# Environment Variable Prerequisites
+#
+#   Do not set the variables here. Instead put them into a file
+#   .comdirect in HOME to keep it separate.
+#
+#   ACHTUNG: IHR HINTERLEGT ZUGANGSDATEN AUF EUER BANKKONTO! 
+#
+#   CLIENT_ID       comdirect client_id of your bank account
+#
+#   CLIENT_SECRET   comdirect client_secret of your bank account
+#
+#   KUNDENUMMER     Eure 6stellige Kundenummer
+#
+#   PIN             Euer PIN/Passwort
+#
+# Access and refresk tokens are read and stored in a file
+# .comdirect.tok in your HOME 
 
+# Make sure curl is available in $PATH
 if ! command -v curl >/dev/null 2>&1 ; then
-    echo >&2 "missing curl."
+    echo >&2 "missing curl"
     exit 1    
 fi
 
+# Make sure jq is available in $PATH
 if ! command -v jq >/dev/null 2>&1 ; then
-    echo >&1 "missing jq."
+    echo >&2 "missing jq"
     exit 1
 fi
 
-CLIENT_REQUEST_ID='{"clientRequestId":{"sessionId":"icanhascheezburger","requestId":0}}'
+# Read credentials from $HOME/.comdirect
+if test -r "$HOME"/.comdirect ; then
+    . "$HOME"/.comdirect
+else
+    echo >&2 "$HOME/.comdirect not found"
+    exit 1   
+fi
+
+# Base URL for all comdirect REST API requests
+base_url=https://api.comdirect.de
+
+# No idea why this is needed. It serves no purpose, just complicates things.
+client_request_id='{"clientRequestId":{"sessionId":"icanhascheezburger","requestId":0}}'
 
 # 2.1 OAuth2 Resource Owner Password Credentials Flow
 
 RESPONSE=$(curl -sS                  \
-     -d client_id=$CLIENT_ID         \
-     -d client_secret=$CLIENT_SECRET \
-     -d username=$USERNAME           \
-     -d password=$PASSWORD           \
+     -d client_id="$CLIENT_ID"         \
+     -d client_secret="$CLIENT_SECRET" \
+     -d username="$USERNAME"           \
+     -d password="$PASSWORD"           \
      -d grant_type=password          \
      -H 'Accept: application/json'   \
-     https://api.comdirect.de/oauth/token)
+     "$base_url"/oauth/token)
 
 ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
 
@@ -33,53 +63,55 @@ RESPONSE=$(curl -sS \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H 'Accept: application/json' \
     -H 'Content-Type: application/json' \
-    -H "x-http-request-info: $CLIENT_REQUEST_ID" \
-    https://api.comdirect.de/api/session/clients/user/v1/sessions)
+    -H "x-http-request-info: $client_request_id" \
+    $base_url/api/session/clients/user/v1/sessions)
 
 IDENTIFIER=$(echo "$RESPONSE" | jq -r ".[].identifier")
 
 # 2.3 Anlage Validierung einer Session-Tan
 
 CLIENT_REQUEST_BODY=$(jq -ncj \
-    --arg identifier $IDENTIFIER \
+    --arg identifier "$IDENTIFIER" \
     '{"identifier":$identifier,"sessionTanActive":true,"activated2FA":true}')
 
 TAN_CHALLENGE_ID=$(curl -sS \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H 'Accept: application/json' \
     -H 'Content-Type: application/json' \
-    -H "x-http-request-info: $CLIENT_REQUEST_ID" \
+    -H "x-http-request-info: $client_request_id" \
     -d "$CLIENT_REQUEST_BODY" \
     -D - \
-    https://api.comdirect.de/api/session/clients/user/v1/sessions/$IDENTIFIER/validate \
+    $base_url/api/session/clients/user/v1/sessions/"$IDENTIFIER"/validate \
     -o /dev/null | grep "x-once-authentication-info" | cut -c29- | jq -r ".id")
 
-read -p "Accept push TAN and press enter to continue"
+# User needs to accept push TAN in comdirect banking app
+read -p "Accept push TAN and press [ENTER] to continue" key_value
+unset key_value
 
 # 2.4 Aktivierung einer Session-TAN
 
 ID_OBJ=$(jq -ncj \
-    --arg id $TAN_CHALLENGE_ID \
+    --arg id "$TAN_CHALLENGE_ID" \
     '{"id":$id}')
 
 curl -X PATCH -sS \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H 'Accept: application/json' \
-    -H "x-http-request-info: $CLIENT_REQUEST_ID" \
+    -H "x-http-request-info: $client_request_id" \
     -H 'Content-Type: application/json' \
     -H "x-once-authentication-info: $ID_OBJ" \
     -d "$CLIENT_REQUEST_BODY" \
-    https://api.comdirect.de/api/session/clients/user/v1/sessions/$IDENTIFIER > /dev/null
+    "$base_url"/api/session/clients/user/v1/sessions/"$IDENTIFIER" > /dev/null
 
 # 2.5 CD Secondary Flow
 
 RESPONSE=$(curl -sS \
-    -d client_id=$CLIENT_ID \
-    -d client_secret=$CLIENT_SECRET \
+    -d client_id="$CLIENT_ID" \
+    -d client_secret="$CLIENT_SECRET" \
     -d grant_type=cd_secondary \
-    -d token=$ACCESS_TOKEN \
+    -d token="$ACCESS_TOKEN" \
     -H 'Accept:application/json' \
-    https://api.comdirect.de/oauth/token)
+    "$base_url"/oauth/token)
 
 ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
 
@@ -88,8 +120,8 @@ curl -sS  \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H 'Accept: application/json' \
     -H 'Content-Type: application/json' \
-    -H "x-http-request-info: $CLIENT_REQUEST_ID" \
-    https://api.comdirect.de/api/banking/clients/user/v2/accounts/balances | jq -r '.values[] | [ .account.accountType.text, .balanceEUR.value] | @tsv'
+    -H "x-http-request-info: $client_request_id" \
+    "$base_url"/api/banking/clients/user/v2/accounts/balances | jq -r '.values[] | [ .account.accountType.text, .balanceEUR.value] | @tsv'
 
 # Revoke token
 
@@ -97,4 +129,4 @@ curl -X DELETE -sS \
     -H 'Accept: application/json' \
     -H 'Content-Type:application/x-www-form-urlencoded' \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
-    https://api.comdirect.de/oauth/revoke
+    "$base_url"/oauth/revoke
