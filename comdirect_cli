@@ -18,6 +18,11 @@
 # Access and refresk tokens are read and stored in a file
 # .comdirect.tok in your HOME 
 
+# Base URL for all comdirect REST API requests
+base_url=https://api.comdirect.de
+# No idea why this is needed. It serves no purpose, just complicates things.
+client_request_id='{"clientRequestId":{"sessionId":"icanhascheezburger","requestId":0}}'
+
 # Make sure curl is available in $PATH
 if ! command -v curl >/dev/null 2>&1 ; then
     echo >&2 "missing curl"
@@ -38,75 +43,86 @@ else
     exit 1   
 fi
 
-# Variables used in this script
+authenticate()
+{
+    # 2.1 OAuth2 Resource Owner Password Credentials Flow
+    curl_data="client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET&username=$USERNAME&password=$PASSWORD&grant_type=password"
+    RESPONSE=$(curl -sS -d "$curl_data" "$base_url"/oauth/token)
+    ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
 
-# Base URL for all comdirect REST API requests
-base_url=https://api.comdirect.de
+    # 2.2 Abruf Session-Status
+    RESPONSE=$(curl -sS \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H 'Accept: application/json' \
+        -H 'Content-Type: application/json' \
+        -H "x-http-request-info: $client_request_id" \
+        $base_url/api/session/clients/user/v1/sessions)
 
-# No idea why this is needed. It serves no purpose, just complicates things.
-client_request_id='{"clientRequestId":{"sessionId":"icanhascheezburger","requestId":0}}'
+    IDENTIFIER=$(echo "$RESPONSE" | jq -r ".[].identifier")
 
-# 2.1 OAuth2 Resource Owner Password Credentials Flow
-curl_data="client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET&username=$USERNAME&password=$PASSWORD&grant_type=password"
-RESPONSE=$(curl -sS -d "$curl_data" "$base_url"/oauth/token)
-ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
+    # 2.3 Anlage Validierung einer Session-Tan
+    CLIENT_REQUEST_BODY=$(jq -ncj \
+        --arg identifier "$IDENTIFIER" \
+        '{"identifier":$identifier,"sessionTanActive":true,"activated2FA":true}')
 
-# 2.2 Abruf Session-Status
-RESPONSE=$(curl -sS \
-    -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -H 'Accept: application/json' \
-    -H 'Content-Type: application/json' \
-    -H "x-http-request-info: $client_request_id" \
-    $base_url/api/session/clients/user/v1/sessions)
+    TAN_CHALLENGE_ID=$(curl -sS \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H 'Accept: application/json' \
+        -H 'Content-Type: application/json' \
+        -H "x-http-request-info: $client_request_id" \
+        -d "$CLIENT_REQUEST_BODY" \
+        -D - \
+        $base_url/api/session/clients/user/v1/sessions/"$IDENTIFIER"/validate \
+        -o /dev/null | grep "x-once-authentication-info" | cut -c29- | jq -r ".id")
 
-IDENTIFIER=$(echo "$RESPONSE" | jq -r ".[].identifier")
+    # User needs to accept push TAN in comdirect banking app
+    read -p "Accept push TAN and press [ENTER] to continue" key_value
+    unset key_value
 
-# 2.3 Anlage Validierung einer Session-Tan
-CLIENT_REQUEST_BODY=$(jq -ncj \
-    --arg identifier "$IDENTIFIER" \
-    '{"identifier":$identifier,"sessionTanActive":true,"activated2FA":true}')
+    # 2.4 Aktivierung einer Session-TAN
+    ID_OBJ=$(jq -ncj \
+        --arg id "$TAN_CHALLENGE_ID" \
+        '{"id":$id}')
 
-TAN_CHALLENGE_ID=$(curl -sS \
-    -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -H 'Accept: application/json' \
-    -H 'Content-Type: application/json' \
-    -H "x-http-request-info: $client_request_id" \
-    -d "$CLIENT_REQUEST_BODY" \
-    -D - \
-    $base_url/api/session/clients/user/v1/sessions/"$IDENTIFIER"/validate \
-    -o /dev/null | grep "x-once-authentication-info" | cut -c29- | jq -r ".id")
+    curl -X PATCH -sS \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        -H 'Accept: application/json' \
+        -H "x-http-request-info: $client_request_id" \
+        -H 'Content-Type: application/json' \
+        -H "x-once-authentication-info: $ID_OBJ" \
+        -d "$CLIENT_REQUEST_BODY" \
+        "$base_url"/api/session/clients/user/v1/sessions/"$IDENTIFIER" > /dev/null
 
-# User needs to accept push TAN in comdirect banking app
-read -p "Accept push TAN and press [ENTER] to continue" key_value
-unset key_value
+    # 2.5 CD Secondary Flow
+    RESPONSE=$(curl -sS \
+        -d client_id="$CLIENT_ID" \
+        -d client_secret="$CLIENT_SECRET" \
+        -d grant_type=cd_secondary \
+        -d token="$ACCESS_TOKEN" \
+        -H 'Accept:application/json' \
+        "$base_url"/oauth/token)
 
-# 2.4 Aktivierung einer Session-TAN
-ID_OBJ=$(jq -ncj \
-    --arg id "$TAN_CHALLENGE_ID" \
-    '{"id":$id}')
+    # No idea why we need to override the access_token with a new value
+    ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
+    REFRESH_TOKEN=$(echo "$RESPONSE" | jq -r ".refresh_token")
+    echo "ACCESS_TOKEN=${ACCESS_TOKEN}\nREFRESH_TOKEN=$REFRESH_TOKEN" > "$HOME"/.comdirect.tok
+}
 
-curl -X PATCH -sS \
-    -H "Authorization: Bearer $ACCESS_TOKEN" \
-    -H 'Accept: application/json' \
-    -H "x-http-request-info: $client_request_id" \
-    -H 'Content-Type: application/json' \
-    -H "x-once-authentication-info: $ID_OBJ" \
-    -d "$CLIENT_REQUEST_BODY" \
-    "$base_url"/api/session/clients/user/v1/sessions/"$IDENTIFIER" > /dev/null
+# Read access and refresh token if available
+# No refresh token workflow at the moment, we only read 
+# the tokens if the file is not older than 600 seconds,
+# otherwise create new access tokens
+if test -r "$HOME"/.comdirect.tok ; then
+    last_modified=$(($(date +%s)-$(stat -c %Y "$HOME"/.comdirect.tok)))
+    if test $last_modified -le 600 ; then
+        . "$HOME"/.comdirect.tok
+    else
+        authenticate
+    fi
+else
+    authenticate
+fi
 
-# 2.5 CD Secondary Flow
-RESPONSE=$(curl -sS \
-    -d client_id="$CLIENT_ID" \
-    -d client_secret="$CLIENT_SECRET" \
-    -d grant_type=cd_secondary \
-    -d token="$ACCESS_TOKEN" \
-    -H 'Accept:application/json' \
-    "$base_url"/oauth/token)
-
-# No idea why we override the access_token again.
-ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
-
-# Maybe we can use the column command to pretty print the outout?
 
 # 4.1.1 Abruf AccountBalances alle Konten
 curl -sS  \
@@ -114,16 +130,17 @@ curl -sS  \
     -H 'Accept: application/json' \
     -H 'Content-Type: application/json' \
     -H "x-http-request-info: $client_request_id" \
-    "$base_url"/api/banking/clients/user/v2/accounts/balances | jq -r '.values[] | [ .account.accountType.text, .balanceEUR.value] | @csv' | column -t -s,
-
+    "$base_url"/api/banking/clients/user/v2/accounts/balances \
+    | jq -r '.values[] | [ .account.accountType.text, .balanceEUR.value] | @csv' \
+    | column -t -s,
 
 
 # Revoke token
-curl -X DELETE -sS \
-    -H 'Accept: application/json' \
-    -H 'Content-Type:application/x-www-form-urlencoded' \
-    -H "Authorization: Bearer $ACCESS_TOKEN" \
-    "$base_url"/oauth/revoke
+# curl -X DELETE -sS \
+#    -H 'Accept: application/json' \
+#    -H 'Content-Type:application/x-www-form-urlencoded' \
+#    -H "Authorization: Bearer $ACCESS_TOKEN" \
+#    "$base_url"/oauth/revoke
 
 # we are done
 exit 0
