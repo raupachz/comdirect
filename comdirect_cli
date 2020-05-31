@@ -38,6 +38,8 @@ else
     exit 1   
 fi
 
+# Variables used in this script
+
 # Base URL for all comdirect REST API requests
 base_url=https://api.comdirect.de
 
@@ -45,20 +47,11 @@ base_url=https://api.comdirect.de
 client_request_id='{"clientRequestId":{"sessionId":"icanhascheezburger","requestId":0}}'
 
 # 2.1 OAuth2 Resource Owner Password Credentials Flow
-
-RESPONSE=$(curl -sS                  \
-     -d client_id="$CLIENT_ID"         \
-     -d client_secret="$CLIENT_SECRET" \
-     -d username="$USERNAME"           \
-     -d password="$PASSWORD"           \
-     -d grant_type=password          \
-     -H 'Accept: application/json'   \
-     "$base_url"/oauth/token)
-
+curl_data="client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET&username=$USERNAME&password=$PASSWORD&grant_type=password"
+RESPONSE=$(curl -sS -d "$curl_data" "$base_url"/oauth/token)
 ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
 
 # 2.2 Abruf Session-Status
-
 RESPONSE=$(curl -sS \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     -H 'Accept: application/json' \
@@ -69,7 +62,6 @@ RESPONSE=$(curl -sS \
 IDENTIFIER=$(echo "$RESPONSE" | jq -r ".[].identifier")
 
 # 2.3 Anlage Validierung einer Session-Tan
-
 CLIENT_REQUEST_BODY=$(jq -ncj \
     --arg identifier "$IDENTIFIER" \
     '{"identifier":$identifier,"sessionTanActive":true,"activated2FA":true}')
@@ -89,7 +81,6 @@ read -p "Accept push TAN and press [ENTER] to continue" key_value
 unset key_value
 
 # 2.4 Aktivierung einer Session-TAN
-
 ID_OBJ=$(jq -ncj \
     --arg id "$TAN_CHALLENGE_ID" \
     '{"id":$id}')
@@ -104,7 +95,6 @@ curl -X PATCH -sS \
     "$base_url"/api/session/clients/user/v1/sessions/"$IDENTIFIER" > /dev/null
 
 # 2.5 CD Secondary Flow
-
 RESPONSE=$(curl -sS \
     -d client_id="$CLIENT_ID" \
     -d client_secret="$CLIENT_SECRET" \
@@ -113,7 +103,10 @@ RESPONSE=$(curl -sS \
     -H 'Accept:application/json' \
     "$base_url"/oauth/token)
 
+# No idea why we override the access_token again.
 ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
+
+# Maybe we can use the column command to pretty print the outout?
 
 # 4.1.1 Abruf AccountBalances alle Konten
 curl -sS  \
@@ -121,12 +114,16 @@ curl -sS  \
     -H 'Accept: application/json' \
     -H 'Content-Type: application/json' \
     -H "x-http-request-info: $client_request_id" \
-    "$base_url"/api/banking/clients/user/v2/accounts/balances | jq -r '.values[] | [ .account.accountType.text, .balanceEUR.value] | @tsv'
+    "$base_url"/api/banking/clients/user/v2/accounts/balances | jq -r '.values[] | [ .account.accountType.text, .balanceEUR.value] | @csv' | column -t -s,
+
+
 
 # Revoke token
-
 curl -X DELETE -sS \
     -H 'Accept: application/json' \
     -H 'Content-Type:application/x-www-form-urlencoded' \
     -H "Authorization: Bearer $ACCESS_TOKEN" \
     "$base_url"/oauth/revoke
+
+# we are done
+exit 0
