@@ -15,13 +15,15 @@
 #
 #   PIN             Euer PIN/Passwort
 #
-# Access and refresk tokens are read and stored in a file
-# .comdirect.tok in your HOME 
 
 # Base URL for all comdirect REST API requests
 base_url=https://api.comdirect.de
+
 # No idea why this is needed. It serves no purpose, just complicates things.
 client_request_id='{"clientRequestId":{"sessionId":"icanhascheezburger","requestId":0}}'
+
+# Access and refresk tokens are read and stored in a file
+# .comdirect.tok in your HOME 
 
 # Make sure curl is available in $PATH
 if ! command -v curl >/dev/null 2>&1 ; then
@@ -108,16 +110,24 @@ authenticate()
     echo "ACCESS_TOKEN=${ACCESS_TOKEN}\nREFRESH_TOKEN=$REFRESH_TOKEN" > "$HOME"/.comdirect.tok
 }
 
+refresh_token_flow()
+{
+    curl_data="client_id=$CLIENT_ID&client_secret=$CLIENT_SECRET&refresh_token=$REFRESH_TOKEN&grant_type=refresh_token"
+    RESPONSE=$(curl -sS -d "$curl_data" "$base_url"/oauth/token)
+    ACCESS_TOKEN=$(echo "$RESPONSE" | jq -r ".access_token")
+    REFRESH_TOKEN=$(echo "$RESPONSE" | jq -r ".refresh_token")
+    echo "ACCESS_TOKEN=${ACCESS_TOKEN}\nREFRESH_TOKEN=$REFRESH_TOKEN" > "$HOME"/.comdirect.tok
+}
+
 # Read access and refresh token if available
 # No refresh token workflow at the moment, we only read 
 # the tokens if the file is not older than 600 seconds,
 # otherwise create new access tokens
 if test -r "$HOME"/.comdirect.tok ; then
+    . "$HOME"/.comdirect.tok
     last_modified=$(($(date +%s)-$(stat -c %Y "$HOME"/.comdirect.tok)))
-    if test $last_modified -le 600 ; then
-        . "$HOME"/.comdirect.tok
-    else
-        authenticate
+    if test $last_modified -ge 599 ; then
+        refresh_token_flow
     fi
 else
     authenticate
