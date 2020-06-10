@@ -1,5 +1,6 @@
 # comdirect_cli
 
+Eigentlich wollte ich hier ein paar nette Skripte für die comdirect REST API sammeln. Leider halte ich die API der comdirect in Ihrer aktuellen Form [nicht sinnvoll nutzbar](https://community.comdirect.de/t5/Website-Apps/Keine-Empfehlung-für-die-comdirect-REST-API/m-p/125889). Von daher leg ich das Thema erstmal aufs Eis.
 
 
 ### Installation Requirements
